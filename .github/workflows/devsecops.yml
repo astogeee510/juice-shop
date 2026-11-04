@@ -73,12 +73,20 @@ jobs:
           # se excluyen los tests compilados (no son código de producción)
           rm -rf build/test build/cypress.config.js*
 
+      # njsscan necesita semgrep, que no se instala solo: se fija Python 3.12
+      # y se instalan ambos explícitamente.
+      - name: Use Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: njsscan
         # Informativo: njsscan devuelve código 1 cuando encuentra hallazgos.
         # Se usa salida JSON porque la salida de consola de njsscan 1.0.2
         # se cae en el runner (AttributeError) antes de mostrar los hallazgos.
         run: |
-          pipx install --python python3.12 njsscan || pipx install njsscan
+          pip install njsscan semgrep
+          semgrep --version
           njsscan build --json -o njsscan.json || true
           python3 - <<'EOF'
           import json
@@ -89,6 +97,8 @@ jobs:
           for e in d.get('errors', [])[:5]:
               print('  aviso:', e.get('message', e) if isinstance(e, dict) else e)
           print()
+          if not hallazgos:
+              raise SystemExit('ERROR: njsscan no produjo resultados (revisa los avisos)')
           for regla, v in sorted(hallazgos.items(), key=lambda x: x[1]['metadata']['severity']):
               m = v['metadata']
               print(f"[{m['severity']}] {regla} | {m.get('cwe', '')} | OWASP {m.get('owasp-web', '')}")
