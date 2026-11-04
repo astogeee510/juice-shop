@@ -1,0 +1,116 @@
+name: DevSecOps Pipeline - Juice Shop
+
+# Disparador: el pipeline corre solo con cada push a master/main
+# (y se puede lanzar a mano desde la pestaña Actions).
+on:
+  push:
+    branches: [ master, main ]
+  workflow_dispatch:
+
+env:
+  # Juice Shop v20 exige Node 22-26 (package.json -> engines). Node 18 ya no sirve.
+  NODE_VERSION: '24'
+  # El binario de Cypress no se usa en este pipeline: se omite para ahorrar tiempo.
+  CYPRESS_INSTALL_BINARY: '0'
+
+jobs:
+  # 1. BUILD & TEST: compila la app y corre las pruebas unitarias.
+  #    Si un test falla, el job queda rojo y TODO lo demás se detiene
+  #    (Fail Fast / Broken Build).
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Use Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install Dependencies (incluye build del frontend y del server)
+        run: npm install
+
+      - name: Run Unit Tests (server) + cobertura
+        # En Juice Shop v20 "test:units" y "test:dist" ya no existen;
+        # las pruebas unitarias del backend se corren con test:server.
+        run: npm run test:server:coverage
+
+  # 2. SCA: análisis de dependencias de terceros con npm audit.
+  #    Informativo: "|| true" evita que el job falle, para ver el reporte.
+  security-sca:
+    needs: unit-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Use Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Run NPM Audit
+        run: npm audit --audit-level=high || true
+
+  # 3. SAST: análisis estático del código fuente con njsscan.
+  #    El backend de Juice Shop está en TypeScript y njsscan solo lee
+  #    JavaScript, por eso primero se compila (tsc -> carpeta build/)
+  #    y se escanea el JavaScript que realmente ejecuta el servidor.
+  security-sast:
+    needs: unit-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Use Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Compilar TypeScript a JavaScript
+        run: |
+          npm install --ignore-scripts
+          npm run build:server
+          # se excluyen los tests compilados (no son código de producción)
+          rm -rf build/test build/cypress.config.js*
+
+      - name: njsscan
+        # Informativo: njsscan devuelve código 1 cuando encuentra hallazgos.
+        run: |
+          pipx install njsscan
+          njsscan build || true
+
+  # 4. QUALITY GATE (nivel Experto): rompe el build si npm audit
+  #    encuentra vulnerabilidades CRÍTICAS. En Juice Shop siempre hay,
+  #    así que este job queda ROJO a propósito y bloquea el despliegue.
+  #    (Si quieres el pipeline 100% verde, borra los jobs 4 y 5.)
+  security-gate:
+    needs: [ security-sca, security-sast ]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Use Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Bloquear si hay vulnerabilidades críticas
+        run: |
+          npm audit --json > audit.json || true
+          CRITICAS=$(jq '.metadata.vulnerabilities.critical' audit.json)
+          ALTAS=$(jq '.metadata.vulnerabilities.high' audit.json)
+          echo "Vulnerabilidades críticas: $CRITICAS | altas: $ALTAS"
+          if [ "$CRITICAS" -gt 0 ]; then
+            echo "::error::Quality Gate FALLIDO: $CRITICAS vulnerabilidades críticas. Despliegue bloqueado."
+            exit 1
+          fi
+          echo "Quality Gate OK"
+
+  # 5. DEPLOY (simulado): solo corre si TODO lo anterior pasó.
+  #    Mientras el gate esté rojo, este job aparece como "skipped".
+  deploy:
+    needs: security-gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Despliegue (simulado)
+        run: echo "Desplegando Juice Shop a producción..."
