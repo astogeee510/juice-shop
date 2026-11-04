@@ -75,14 +75,32 @@ jobs:
 
       - name: njsscan
         # Informativo: njsscan devuelve código 1 cuando encuentra hallazgos.
+        # Se usa salida JSON porque la salida de consola de njsscan 1.0.2
+        # se cae en el runner (AttributeError) antes de mostrar los hallazgos.
         run: |
-          pipx install njsscan
-          njsscan build || true
+          pipx install --python python3.12 njsscan || pipx install njsscan
+          njsscan build --json -o njsscan.json || true
+          python3 - <<'EOF'
+          import json
+          d = json.load(open('njsscan.json'))
+          hallazgos = d.get('nodejs', {})
+          total = sum(len(v['files']) for v in hallazgos.values())
+          print(f'njsscan: {total} hallazgos en {len(hallazgos)} reglas\n')
+          for e in d.get('errors', [])[:5]:
+              print('  aviso:', e.get('message', e) if isinstance(e, dict) else e)
+          print()
+          for regla, v in sorted(hallazgos.items(), key=lambda x: x[1]['metadata']['severity']):
+              m = v['metadata']
+              print(f"[{m['severity']}] {regla} | {m.get('cwe', '')} | OWASP {m.get('owasp-web', '')}")
+              print(f"    {m['description']}")
+              for f in v['files']:
+                  print(f"    -> {f['file_path']}:{f['match_lines'][0]}")
+              print()
+          EOF
 
   # 4. QUALITY GATE (nivel Experto): rompe el build si npm audit
   #    encuentra vulnerabilidades CRÍTICAS. En Juice Shop siempre hay,
   #    así que este job queda ROJO a propósito y bloquea el despliegue.
-  #    (Si quieres el pipeline 100% verde, borra los jobs 4 y 5.)
   security-gate:
     needs: [ security-sca, security-sast ]
     runs-on: ubuntu-latest
